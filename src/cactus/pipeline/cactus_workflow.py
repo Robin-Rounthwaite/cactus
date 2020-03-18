@@ -29,6 +29,7 @@ from sonLib.bioio import getLogLevelString
 
 from toil.job import Job
 from toil.common import Toil
+from toil.realtimeLogger import RealtimeLogger
 
 from cactus.shared.common import makeURL
 from cactus.shared.common import cactus_call
@@ -505,6 +506,10 @@ class CactusTrimmingBlastPhase(CactusPhasesJob):
     """Blast ingroups vs outgroups using the trimming strategy before
     running cactus setup.
     """
+    def __init__(self, standAlone = False, *args, **kwargs):
+        self.standAlone = standAlone
+        super(CactusTrimmingBlastPhase, self).__init__(*args, **kwargs)
+        
     def run(self, fileStore):
         fileStore.logToMaster("Running blast using the trimming strategy")
 
@@ -519,9 +524,22 @@ class CactusTrimmingBlastPhase(CactusPhasesJob):
         sequences = [fileStore.readGlobalFile(id) for id in map(itemgetter(1), ingroupsAndOriginalIDs + outgroupsAndOriginalIDs)]
         self.cactusWorkflowArguments.totalSequenceSize = sum(os.stat(x).st_size for x in sequences)
 
+        # hack for modular interface; todo: fix properly with giant refactor
+        totalSizePath = os.path.join(fileStore.getLocalTempDir(), 'totalSequenceSize')
+        with open(totalSizePath, 'w') as totalSizeFile:
+            totalSizeFile.write('{}'.format(self.cactusWorkflowArguments.totalSequenceSize))
+        self.cactusWorkflowArguments.totalSequenceSizeID = fileStore.writeGlobalFile(totalSizePath)
+
         renamedInputSeqDir = fileStore.getLocalTempDir()
-        uniqueFas = prependUniqueIDs(sequences, renamedInputSeqDir)
-        uniqueFaIDs = [fileStore.writeGlobalFile(seq, cleanup=True) for seq in uniqueFas]
+        if not self.standAlone:
+            uniqueFas = prependUniqueIDs(sequences, renamedInputSeqDir, )
+            uniqueFaIDs = [fileStore.writeGlobalFile(seq, cleanup=True) for seq in uniqueFas]
+        else:
+            # dont munge ids in standalone version
+            # We copy these back to the store anyway because ingroupsAndOriginalIDs etc are strings
+            # from the experiment XML and we need them as proper toil file ids later on
+            # todo: fix!
+            uniqueFaIDs = [fileStore.writeGlobalFile(seq) for seq in sequences]
 
         # Set the uniquified IDs for the ingroups and outgroups
         ingroupsAndNewIDs = list(zip(list(map(itemgetter(0), ingroupsAndOriginalIDs)), uniqueFaIDs[:len(ingroupsAndOriginalIDs)]))
@@ -588,6 +606,10 @@ class CactusTrimmingBlastPhase(CactusPhasesJob):
         updateJob = blastJob.addFollowOnJobFn(updateExpWrapperForOutgroups, self.cactusWorkflowArguments.experimentWrapper,
                                               list(map(itemgetter(0), outgroupsAndNewIDs)), self.cactusWorkflowArguments.outgroupFragmentIDs)
         self.cactusWorkflowArguments.experimentWrapper = updateJob.rv()
+
+        # hack to get cactus-blast standalone tool working
+        if self.standAlone:
+            return self.cactusWorkflowArguments
 
         return self.makeFollowOnCheckpointJob(CactusSetupCheckpoint, "setup")
 
