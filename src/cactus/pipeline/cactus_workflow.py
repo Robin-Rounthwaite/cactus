@@ -524,22 +524,9 @@ class CactusTrimmingBlastPhase(CactusPhasesJob):
         sequences = [fileStore.readGlobalFile(id) for id in map(itemgetter(1), ingroupsAndOriginalIDs + outgroupsAndOriginalIDs)]
         self.cactusWorkflowArguments.totalSequenceSize = sum(os.stat(x).st_size for x in sequences)
 
-        # hack for modular interface; todo: fix properly with giant refactor
-        totalSizePath = os.path.join(fileStore.getLocalTempDir(), 'totalSequenceSize')
-        with open(totalSizePath, 'w') as totalSizeFile:
-            totalSizeFile.write('{}'.format(self.cactusWorkflowArguments.totalSequenceSize))
-        self.cactusWorkflowArguments.totalSequenceSizeID = fileStore.writeGlobalFile(totalSizePath)
-
         renamedInputSeqDir = fileStore.getLocalTempDir()
-        if not self.standAlone:
-            uniqueFas = prependUniqueIDs(sequences, renamedInputSeqDir, )
-            uniqueFaIDs = [fileStore.writeGlobalFile(seq, cleanup=True) for seq in uniqueFas]
-        else:
-            # dont munge ids in standalone version
-            # We copy these back to the store anyway because ingroupsAndOriginalIDs etc are strings
-            # from the experiment XML and we need them as proper toil file ids later on
-            # todo: fix!
-            uniqueFaIDs = [fileStore.writeGlobalFile(seq) for seq in sequences]
+        uniqueFas = prependUniqueIDs(sequences, renamedInputSeqDir)
+        uniqueFaIDs = [fileStore.writeGlobalFile(seq, cleanup=True) for seq in uniqueFas]
 
         # Set the uniquified IDs for the ingroups and outgroups
         ingroupsAndNewIDs = list(zip(list(map(itemgetter(0), ingroupsAndOriginalIDs)), uniqueFaIDs[:len(ingroupsAndOriginalIDs)]))
@@ -1288,7 +1275,6 @@ class CactusHalGeneratorPhase2(CactusPhasesJob):
             self.phaseNode.attrib["experimentPath"] = self.cactusWorkflowArguments.experimentFile
             self.phaseNode.attrib["secondaryDatabaseString"] = self.cactusWorkflowArguments.secondaryDatabaseString
             self.phaseNode.attrib["outputFile"] = "1"
-
             self.halID = self.makeRecursiveChildJob(CactusHalGeneratorRecursion, launchSecondaryKtForRecursiveJob=True)
 
         return self.makeFollowOnPhaseJob(CactusHalGeneratorPhase3, "hal")

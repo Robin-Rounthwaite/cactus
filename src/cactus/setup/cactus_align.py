@@ -15,7 +15,7 @@ from operator import itemgetter
 
 from cactus.progressive.seqFile import SeqFile
 from cactus.progressive.multiCactusTree import MultiCactusTree
-from cactus.progressive.cactus_progressive import setupBinaries, importSingularityImage
+from cactus.progressive.cactus_progressive import setupBinaries, importSingularityImage, exportHal
 from cactus.progressive.multiCactusProject import MultiCactusProject
 from cactus.shared.experimentWrapper import ExperimentWrapper
 from cactus.progressive.schedule import Schedule
@@ -26,8 +26,9 @@ from cactus.pipeline.cactus_workflow import CactusWorkflowArguments
 from cactus.pipeline.cactus_workflow import addCactusWorkflowOptions
 from cactus.pipeline.cactus_workflow import CactusTrimmingBlastPhase
 from cactus.pipeline.cactus_workflow import CactusSetupCheckpoint
+from cactus.pipeline.cactus_workflow import prependUniqueIDs
 from cactus.shared.common import makeURL
-
+from toil.realtimeLogger import RealtimeLogger
 
 from toil.job import Job
 from toil.common import Toil
@@ -47,10 +48,6 @@ def main():
     parser.add_argument("outputHal", type=str, help = "Output HAL file")
 
     #Progressive Cactus Options
-    parser.add_argument("--database", dest="database",
-                      help="Database type: tokyo_cabinet or kyoto_tycoon"
-                      " [default: %(default)s]",
-                      default="kyoto_tycoon")
     parser.add_argument("--configFile", dest="configFile",
                       help="Specify cactus configuration file",
                       default=None)
@@ -75,6 +72,9 @@ def main():
     setLoggingFromOptions(options)
 
     options.database = 'kyoto_tycoon'
+
+    options.buildHal = True
+    options.buildFasta = True
     
     # Mess with some toil options to create useful defaults.
 
@@ -91,12 +91,12 @@ def main():
         options.retryCount = 5
 
     start_time = timeit.default_timer()
-    runCactusBlastOnly(options)
+    runCactusAfterBlastOnly(options)
     end_time = timeit.default_timer()
     run_time = end_time - start_time
     logger.info("cactus-blast has finished after {} seconds".format(run_time))
 
-def runCactusBlastOnly(options):
+def runCactusAfterBlastOnly(options):
     with Toil(options) as toil:
         importSingularityImage(options)
         #Run the workflow
@@ -142,6 +142,7 @@ def runCactusBlastOnly(options):
                         catFiles([os.path.join(seq, subSeq) for subSeq in os.listdir(seq)], tmpSeq)
                         seq = tmpSeq
                     seq = makeURL(seq)
+                    
                     experiment.setSequenceID(genome, toil.importFile(seq))
 
             # import the outgroups
@@ -168,9 +169,6 @@ def runCactusBlastOnly(options):
             
             workFlowArgs = CactusWorkflowArguments(options, experimentFile=experimentFile, configNode=configNode, seqIDMap = project.inputSequenceIDMap)
 
-            # hack
-            totalSequenceSizeID = toil.importFile(makeURL(options.blastOutput) + '.total_sequence_size')
-
             #import the files that cactus-blast made
             workFlowArgs.alignmentsID = toil.importFile(makeURL(options.blastOutput))
             try:
@@ -182,18 +180,65 @@ def runCactusBlastOnly(options):
             for i in range(len(leaves)):
                 workFlowArgs.ingroupCoverageIDs.append(toil.importFile(makeURL(options.blastOutput) + '.ig_coverage_{}'.format(i)))
 
-            halID = toil.start(Job.wrapJobFn(run_setup_phase, workFlowArgs, totalSequenceSizeID))
+            halID = toil.start(Job.wrapJobFn(run_cactus_align, configWrapper, workFlowArgs, project))
 
         # export the hal
+        print("export {} -> {}".format(halID, makeURL(options.outputHal)))
         toil.exportFile(halID, makeURL(options.outputHal))
+        
+def run_cactus_align(job, configWrapper, cactusWorkflowArguments, project):
 
-def run_setup_phase(job, cactusWorkflowArguments, totalSequenceSizeID):
-    """ hack to get the sequence size from a file into the arguments """
-    totalSizePath = os.path.join(job.fileStore.getLocalTempDir(), 'totalSequenceSize')
-    job.fileStore.readGlobalFile(totalSequenceSizeID, totalSizePath)
-    with open(totalSizePath, 'r') as sizeFile:
-        cactusWorkflowArguments.totalSequenceSize = int(sizeFile.read().strip())
+    # cactus expects unique ids, but they weren't saved from cactus-blast
+    ids_job = job.addChildJobFn(run_prepend_unique_ids, cactusWorkflowArguments, project,
+                                #todo disk=
+                                )
+    cactusWorkflowArguments = ids_job.rv()
+    
+    # run cactus setup all the way through cactus2hal generation
+    setup_job = ids_job.addFollowOnJobFn(run_setup_phase, cactusWorkflowArguments)
+
+    # set up the project
+    prepare_hal_export_job = setup_job.addFollowOnJobFn(run_prepare_hal_export, project, setup_job.rv())
+
+    # create the hal
+    hal_export_job = prepare_hal_export_job.addFollowOnJobFn(exportHal, prepare_hal_export_job.rv(0), event=prepare_hal_export_job.rv(1),
+                                                             memory=configWrapper.getDefaultMemory(),
+                                                             disk=configWrapper.getExportHalDisk(),
+                                                             preemptable=False)
+    return hal_export_job.rv()
+
+def run_prepend_unique_ids(job, cactusWorkflowArguments, project):
+    """ prepend the unique ids on the input fasta.  this is required for cactus to work (would be great to relax it though"""
+
+    # note, there is an order dependence to everything where we have to match what was done in cactus_workflow
+    # (so the code is pasted exactly as it is there)
+    # this is horrible and needs to be fixed via drastic interface refactor
+    exp = cactusWorkflowArguments.experimentWrapper
+    ingroupsAndOriginalIDs = [(g, exp.getSequenceID(g)) for g in exp.getGenomesWithSequence() if g not in exp.getOutgroupGenomes()]
+    sequences = [job.fileStore.readGlobalFile(id) for id in map(itemgetter(1), ingroupsAndOriginalIDs)]
+    cactusWorkflowArguments.totalSequenceSize = sum(os.stat(x).st_size for x in sequences)
+    renamedInputSeqDir = job.fileStore.getLocalTempDir()
+    uniqueFas = prependUniqueIDs(sequences, renamedInputSeqDir)
+    uniqueFaIDs = [job.fileStore.writeGlobalFile(seq, cleanup=True) for seq in uniqueFas]
+    # Set the uniquified IDs for the ingroups and outgroups
+    ingroupsAndNewIDs = list(zip(list(map(itemgetter(0), ingroupsAndOriginalIDs)), uniqueFaIDs[:len(ingroupsAndOriginalIDs)]))
+    for event, sequenceID in ingroupsAndNewIDs:
+        cactusWorkflowArguments.experimentWrapper.setSequenceID(event, sequenceID)
+    return cactusWorkflowArguments
+
+def run_setup_phase(job, cactusWorkflowArguments):
+    # needs to be its own job to resovolve the workflowargument promise
     return job.addChild(CactusSetupCheckpoint(cactusWorkflowArguments=cactusWorkflowArguments, phaseName="setup")).rv()
+
+def run_prepare_hal_export(job, project, experiment):
+    """ hack up the given project into something that gets exportHal() to do what we want """
+    event = experiment.getRootGenome()
+    exp_path = os.path.join(job.fileStore.getLocalTempDir(), event + '_experiment.xml')
+    experiment.writeXML(exp_path)
+    project.expMap = {event : experiment}
+    project.expIDMap = {event : job.fileStore.writeGlobalFile(exp_path)}
+    return project, event
+    
 
 if __name__ == '__main__':
     main()
