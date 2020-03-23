@@ -766,22 +766,29 @@ def runToilStats(toil, outputFile):
     system("toil stats %s --outputFile %s" % (toil, outputFile))
     logger.info("Ran the job-tree stats command apparently okay")
 
-def runLastz(seq1, seq2, alignmentsFile, lastzArguments, work_dir=None):
+def runLastz(seq1, seq2, alignmentsFile, lastzArguments, work_dir=None, lastzCommand=None):
     if work_dir is None:
         assert os.path.dirname(seq1) == os.path.dirname(seq2)
         work_dir = os.path.dirname(seq1)
+    if lastzCommand is None:
+        lastzCommand = "cPecanLastz"
+    if not isinstance(lastzCommand, list):
+        lastzCommand = lastzCommand.split()
     cactus_call(work_dir=work_dir, outfile=alignmentsFile,
-                parameters=["cPecanLastz",
-                            "--format=cigar",
+                parameters=lastzCommand + ["--format=cigar",
                             "--notrivial"] + lastzArguments.split() +
                            ["%s[multiple][nameparse=darkspace]" % seq1,
                             "%s[nameparse=darkspace]" % seq2])
 
-def runSelfLastz(seq, alignmentsFile, lastzArguments, work_dir=None):
+def runSelfLastz(seq, alignmentsFile, lastzArguments, work_dir=None, lastzCommand=None):
     if work_dir is None:
         work_dir = os.path.dirname(seq)
+    if lastzCommand is None:
+        lastzCommand = "cPecanLastz"
+    if not isinstance(lastzCommand, list):
+        lastzCommand = lastzCommand.split()
     cactus_call(work_dir=work_dir, outfile=alignmentsFile,
-                parameters=["cPecanLastz",
+                parameters=lastzCommand + ["--format=cigar",
                             "--format=cigar",
                             "--notrivial"] + lastzArguments.split() +
                            ["%s[multiple][nameparse=darkspace]" % seq,
