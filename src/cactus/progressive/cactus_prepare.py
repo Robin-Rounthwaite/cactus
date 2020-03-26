@@ -36,6 +36,7 @@ def main():
 
     options = parser.parse_args()
     options.database = 'kyoto_tycoon'
+    #todo support root option
     options.root = None
 
     # need to go through this garbage (copied from the main() in progressive_cactus) to

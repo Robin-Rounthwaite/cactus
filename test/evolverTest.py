@@ -147,7 +147,7 @@ class TestCase(unittest.TestCase):
         self._check_stats(self._out_hal("local"))
         self._check_coverage(self._out_hal("local"))
 
-    def atestEvolverDocker(self):
+    def testEvolverDocker(self):
         """ Check that the output of halStats on a hal file produced by running cactus with --binariesMode docker is 
         is reasonable.  Note: the local image being tested should be set up via CACTUS_DOCKER_ORG (with tag==latest)
         """
